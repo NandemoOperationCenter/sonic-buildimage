@@ -72,13 +72,13 @@ DEFAULT_BUILD_LOG_TIMESTAMP = none
 CHANGE_DEFAULT_PASSWORD ?= n
 
 # DEFAULT_USERNAME - default username for installer build
-DEFAULT_USERNAME = admin
+DEFAULT_USERNAME = tmcit
 
 # DEFAULT_PASSWORD - default password for installer build
 # DEFAULT_PASSWORD can be set to empty string to disable the default password.
 # Empty string means admin account has no password; console login works,
 # SSH login is blocked (PermitEmptyPasswords no). Set a real password on first login.
-DEFAULT_PASSWORD = YourPaSsWoRd
+DEFAULT_PASSWORD = tmcit1919810.931
 
 # BMC_NOS_ACCOUNT_USERNAME - default BMC NOS account username
 BMC_NOS_ACCOUNT_USERNAME ?= yormnAnb
