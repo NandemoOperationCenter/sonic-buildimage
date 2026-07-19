@@ -1,12 +1,12 @@
 [Unit]
 Description=Delta ag9032v2a Platform modules
-After=local-fs.target
-Before=pmon.service
+After=local-fs.target systemd-modules-load.service
+Before=pmon.service xcvrd.service
 
 [Service]
 Type=oneshot
-ExecStart=-/etc/init.d/platform-modules-ag9032v2a start
-ExecStop=-/etc/init.d/platform-modules-ag9032v2a stop
+ExecStart=/usr/local/bin/ag9032v2a_platform_init.sh start
+ExecStop=/usr/local/bin/ag9032v2a_platform_init.sh stop
 RemainAfterExit=yes
 
 [Install]

@@ -1,6 +1,6 @@
 #include <linux/init.h>
+#include <linux/bitops.h>
 #include <linux/slab.h>
-#include <linux/platform_data/pca954x.h>
 #include <linux/i2c-mux.h>
 #include <linux/device.h>
 #include <linux/module.h>
@@ -190,55 +190,97 @@ static struct cpld_platform_data ag9032v2a_swpld3_platform_data[] = {
     },
 };
 
-// pca9548 - add 8 bus 
-static struct pca954x_platform_mode pca954x_mode[] = 
-{
-    { 
-        .adap_id = 10,
-        .deselect_on_exit = 1,
-    },
-    { 
-        .adap_id = 11,
-        .deselect_on_exit = 1,
-    },
-    { 
-        .adap_id = 12,
-        .deselect_on_exit = 1,
-    },
-    { 
-        .adap_id = 13,
-        .deselect_on_exit = 1,
-    },
-    { 
-        .adap_id = 14,
-        .deselect_on_exit = 1,
-    },
-    {   
-        .adap_id = 15,
-        .deselect_on_exit = 1,
-    },
-    { 
-        .adap_id = 16,
-        .deselect_on_exit = 1,
-    },
-    { 
-        .adap_id = 17,
-        .deselect_on_exit = 1,
-    },
-};
-
-static struct pca954x_platform_data pca954x_data = 
-{
-    .modes = pca954x_mode, 
-    .num_modes = ARRAY_SIZE(pca954x_mode),
-};
-
 static struct i2c_board_info __initdata i2c_info_pca9548[] =
 {
     {
-        I2C_BOARD_INFO("pca9548", 0x71),
-        .platform_data = &pca954x_data,
+        /*
+         * The upstream pca954x driver dropped platform-data support, which
+         * formerly forced channels to buses 10--17.  Bind our local driver
+         * instead so the established platform topology remains stable.
+         */
+        I2C_BOARD_INFO("delta-pca9548", 0x71),
     },
+};
+
+/*
+ * Linux 6.12's pca954x driver intentionally no longer accepts platform data
+ * for forced adapter numbers.  The userspace EEPROM and transceiver contract
+ * relies on 10--17, so keep that mapping in this small local I2C mux driver.
+ */
+struct delta_pca9548 {
+    struct i2c_client *client;
+};
+
+static int delta_pca9548_select(struct i2c_mux_core *muxc, u32 chan)
+{
+    struct delta_pca9548 *pca = i2c_mux_priv(muxc);
+
+    return i2c_smbus_write_byte(pca->client, BIT(chan));
+}
+
+static int delta_pca9548_deselect(struct i2c_mux_core *muxc, u32 chan)
+{
+    struct delta_pca9548 *pca = i2c_mux_priv(muxc);
+
+    return i2c_smbus_write_byte(pca->client, 0);
+}
+
+static int delta_pca9548_probe(struct i2c_client *client)
+{
+    struct i2c_mux_core *muxc;
+    struct delta_pca9548 *pca;
+    int channel;
+    int ret;
+
+    if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE))
+        return dev_err_probe(&client->dev, -EOPNOTSUPP,
+                             "SMBus byte transactions are unavailable\n");
+
+    muxc = i2c_mux_alloc(client->adapter, &client->dev, 8, sizeof(*pca), 0,
+                         delta_pca9548_select, delta_pca9548_deselect);
+    if (!muxc)
+        return -ENOMEM;
+
+    pca = i2c_mux_priv(muxc);
+    pca->client = client;
+    i2c_set_clientdata(client, muxc);
+
+    for (channel = 0; channel < 8; channel++) {
+        ret = i2c_mux_add_adapter(muxc, 10 + channel, channel);
+        if (ret)
+            goto err_del_adapters;
+    }
+
+    return 0;
+
+err_del_adapters:
+    i2c_mux_del_adapters(muxc);
+    return dev_err_probe(&client->dev, ret,
+                         "failed to add fixed PCA9548 adapter %d\n",
+                         10 + channel);
+}
+
+static void delta_pca9548_remove(struct i2c_client *client)
+{
+    struct i2c_mux_core *muxc = i2c_get_clientdata(client);
+
+    if (muxc)
+        i2c_mux_del_adapters(muxc);
+}
+
+static const struct i2c_device_id delta_pca9548_ids[] = {
+    { "delta-pca9548", 0 },
+    { }
+};
+MODULE_DEVICE_TABLE(i2c, delta_pca9548_ids);
+
+static struct i2c_driver delta_pca9548_driver = {
+    .driver = {
+        .name = "delta-pca9548",
+    },
+    .probe = delta_pca9548_probe,
+    .remove = delta_pca9548_remove,
+    .id_table = delta_pca9548_ids,
 };
 
 /*----------------   I2C device   - start   ------------- */
@@ -490,7 +532,7 @@ static struct platform_device ag9032v2a_i2c_device[] = {
 
 /*----------------   I2C driver   - start   ------------- */
 
-static int __init i2c_device_probe(struct platform_device *pdev)
+static int i2c_device_probe(struct platform_device *pdev)
 {
     struct i2c_device_platform_data *pdata;
     struct i2c_adapter *parent;
@@ -508,40 +550,39 @@ static int __init i2c_device_probe(struct platform_device *pdev)
         return -ENODEV;
     }
 
-    pdata->client = i2c_new_device(parent, &pdata->info);
-    if (!pdata->client) {
+    pdata->client = i2c_new_client_device(parent, &pdata->info);
+    i2c_put_adapter(parent);
+    if (IS_ERR(pdata->client)) {
+        int ret = PTR_ERR(pdata->client);
+
+        pdata->client = NULL;
         dev_err(&pdev->dev, "Failed to create i2c client %s at %d\n",
             pdata->info.type, pdata->parent);
-        return -ENODEV;
+        return ret;
     }
 
     return 0; 
 }
 
-static int __exit i2c_deivce_remove(struct platform_device *pdev)
+static void i2c_deivce_remove(struct platform_device *pdev)
 {
-    struct i2c_adapter *parent;
     struct i2c_device_platform_data *pdata;
 
     pdata = pdev->dev.platform_data;
     if (!pdata) {
         dev_err(&pdev->dev, "Missing platform data\n");
-        return -ENODEV;
+        return;
     }
 
     if (pdata->client) {
-        parent = (pdata->client)->adapter;
         i2c_unregister_device(pdata->client);
-        i2c_put_adapter(parent);
+        pdata->client = NULL;
     }
-
-    return 0;
 }
 static struct platform_driver i2c_device_driver = {
     .probe = i2c_device_probe,
-    .remove = __exit_p(i2c_deivce_remove),
+    .remove = i2c_deivce_remove,
     .driver = {
-        .owner = THIS_MODULE,
         .name = "delta-ag9032v2a-i2c-device",
     }
 };
@@ -549,21 +590,20 @@ static struct platform_driver i2c_device_driver = {
 /*----------------   I2C driver   - end   ------------- */
 
 /*----------------    SFP attribute read/write - start -------- */
-static struct kobject *kobj_swpld1;
-static struct kobject *kobj_swpld2;
-static struct kobject *kobj_swpld3;
-
 static ssize_t for_status(struct device *dev, struct device_attribute *dev_attr, char *buf){
     struct sensor_device_attribute *attr = to_sensor_dev_attr(dev_attr);
-    struct device *i2cdev_1 = kobj_to_dev(kobj_swpld1);
-    struct device *i2cdev_2 = kobj_to_dev(kobj_swpld2);
-    struct cpld_platform_data *pdata1 = i2cdev_1->platform_data;
-    struct cpld_platform_data *pdata2 = i2cdev_2->platform_data;
+    struct cpld_platform_data *pdata1 = ag9032v2a_swpld1_platform_data;
+    struct cpld_platform_data *pdata2 = ag9032v2a_swpld2_platform_data;
     int ret;
     int ret_sfp;
     u64 data = 0;
 
     mutex_lock(&dni_lock);
+    if (!pdata1 || !pdata2 || !pdata1[swpld1].client ||
+        !pdata2[swpld2].client) {
+        mutex_unlock(&dni_lock);
+        return -ENODEV;
+    }
     switch (attr->index) {
         case SFP_IS_PRESENT:
             /*QSFP25~32*/
@@ -582,7 +622,7 @@ static ssize_t for_status(struct device *dev, struct device_attribute *dev_attr,
             ret = i2c_smbus_read_byte_data(pdata2[swpld2].client, SFP_PRESENCE_5);
             ret_sfp = (ret & (0x80));
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%x%02x\n", data, ret_sfp);
+            return sysfs_emit(buf, "0x%x%02x\n", data, ret_sfp);
 
         case QSFP_LPMODE:
             /*QSFP25~32*/
@@ -598,7 +638,7 @@ static ssize_t for_status(struct device *dev, struct device_attribute *dev_attr,
             ret = i2c_smbus_read_byte_data(pdata1[swpld1].client, QSFP_LPMODE_1);
             data |= (u32)(ret & 0xff) << 24;
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%x\n", data);
+            return sysfs_emit(buf, "0x%x\n", data);
 
          case QSFP_RESET:
             /*QSFP25~32*/
@@ -614,18 +654,17 @@ static ssize_t for_status(struct device *dev, struct device_attribute *dev_attr,
             ret = i2c_smbus_read_byte_data(pdata1[swpld1].client, QSFP_RESET_1);
             data |= (u32)(ret & 0xff) << 24;
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%x\n", data);
+            return sysfs_emit(buf, "0x%x\n", data);
 
         default:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "%d not found", attr->index);
+            return sysfs_emit(buf, "%d not found\n", attr->index);
     }
 }
 
 static ssize_t set_lpmode_data(struct device *dev, struct device_attribute *dev_attr, const char *buf, size_t count)
 {
-    struct device *i2cdev = kobj_to_dev(kobj_swpld1);
-    struct cpld_platform_data *pdata = i2cdev->platform_data;
+    struct cpld_platform_data *pdata = ag9032v2a_swpld1_platform_data;
     unsigned long long set_data;
     int err;
     int status = 0;
@@ -637,6 +676,10 @@ static ssize_t set_lpmode_data(struct device *dev, struct device_attribute *dev_
         return err;
     }
     mutex_lock(&dni_lock);
+    if (!pdata[swpld1].client) {
+        mutex_unlock(&dni_lock);
+        return -ENODEV;
+    }
     /*QSFP25~32*/
     set_bytes = set_data & 0xff;
     status = i2c_smbus_write_byte_data(pdata[swpld1].client, QSFP_LPMODE_4, set_bytes);
@@ -680,8 +723,7 @@ ERROR:
 
 static ssize_t set_reset_data(struct device *dev, struct device_attribute *dev_attr, const char *buf, size_t count)
 {
-    struct device *i2cdev = kobj_to_dev(kobj_swpld1);
-    struct cpld_platform_data *pdata = i2cdev->platform_data;
+    struct cpld_platform_data *pdata = ag9032v2a_swpld1_platform_data;
     unsigned long long set_data;
     int err;
     int status = 0;
@@ -693,6 +735,10 @@ static ssize_t set_reset_data(struct device *dev, struct device_attribute *dev_a
     }
 
     mutex_lock(&dni_lock);
+    if (!pdata[swpld1].client) {
+        mutex_unlock(&dni_lock);
+        return -ENODEV;
+    }
     /*QSFP25~32*/
     set_bytes = set_data & 0xff;
     status = i2c_smbus_write_byte_data(pdata[swpld1].client, QSFP_RESET_4, set_bytes);
@@ -792,58 +838,58 @@ static ssize_t get_cpld_reg(struct device *dev, struct device_attribute *dev_att
     switch (attr->index) {
         case CPLD_REG_ADDR:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x\n", cpupld_reg_addr);
+            return sysfs_emit(buf, "0x%02x\n", cpupld_reg_addr);
         case SWPLD1_REG_ADDR:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x\n", swpld1_reg_addr);
+            return sysfs_emit(buf, "0x%02x\n", swpld1_reg_addr);
         case SWPLD2_REG_ADDR:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x\n", swpld2_reg_addr);
+            return sysfs_emit(buf, "0x%02x\n", swpld2_reg_addr);
         case SWPLD3_REG_ADDR:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x\n", swpld3_reg_addr);
+            return sysfs_emit(buf, "0x%02x\n", swpld3_reg_addr);
         case SWPLD1_REG_VALUE:
             ret = i2c_smbus_read_byte_data(pdata[swpld1].client, swpld1_reg_addr);
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x\n", ret);
+            return sysfs_emit(buf, "0x%02x\n", ret);
         case SWPLD2_REG_VALUE:
             ret = i2c_smbus_read_byte_data(pdata[swpld2].client, swpld2_reg_addr);
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x\n", ret);
+            return sysfs_emit(buf, "0x%02x\n", ret);
         case SWPLD3_REG_VALUE:
             ret = i2c_smbus_read_byte_data(pdata[swpld3].client, swpld3_reg_addr);
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x\n", ret);
+            return sysfs_emit(buf, "0x%02x\n", ret);
         default:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "%d not found", attr->index);
+            return sysfs_emit(buf, "%d not found\n", attr->index);
     } 
     
     switch (mask) 
     {
         case 0xff:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%02x%s", value, note);
+            return sysfs_emit(buf, "0x%02x%s", value, note);
         case 0x0f:
         case 0x03:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "0x%01x%s", value, note);
+            return sysfs_emit(buf, "0x%01x%s", value, note);
         case 0x0c:
             mutex_unlock(&dni_lock);
             value = value >> 2;
-            return sprintf(buf, "0x%01x%s", value, note);
+            return sysfs_emit(buf, "0x%01x%s", value, note);
         case 0xf0:
             mutex_unlock(&dni_lock);
             value = value >> 4;
-            return sprintf(buf, "0x%01x%s", value, note);
+            return sysfs_emit(buf, "0x%01x%s", value, note);
         case 0xe0:
             mutex_unlock(&dni_lock);
             value = value >> 5;
-            return sprintf(buf, "0x%01x%s", value, note);
+            return sysfs_emit(buf, "0x%01x%s", value, note);
         default :
             value = value >> dni_log2(mask);
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "%d%s", value, note);
+            return sysfs_emit(buf, "%d%s", value, note);
     }
 }
 
@@ -909,7 +955,7 @@ static ssize_t set_cpld_reg(struct device *dev, struct device_attribute *dev_att
             return count;
         default:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "%d not found", attr->index);
+            return sysfs_emit(buf, "%d not found\n", attr->index);
     }
 
     switch (mask) {
@@ -934,26 +980,26 @@ static ssize_t set_cpld_reg(struct device *dev, struct device_attribute *dev_att
     switch (attr->index) {
         default:
             mutex_unlock(&dni_lock);
-            return sprintf(buf, "cpld not found"); 
+            return sysfs_emit(buf, "cpld not found\n");
     }
     mutex_unlock(&dni_lock);
     return count;
 }
 
 //address and value
-static SENSOR_DEVICE_ATTR(cpld_reg_addr,    S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, CPLD_REG_ADDR);
-static SENSOR_DEVICE_ATTR(cpld_reg_value,   S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, CPLD_REG_VALUE);
-static SENSOR_DEVICE_ATTR(swpld1_reg_addr,  S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, SWPLD1_REG_ADDR);
-static SENSOR_DEVICE_ATTR(swpld1_reg_value, S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, SWPLD1_REG_VALUE);
-static SENSOR_DEVICE_ATTR(swpld2_reg_addr,  S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, SWPLD2_REG_ADDR);
-static SENSOR_DEVICE_ATTR(swpld2_reg_value, S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, SWPLD2_REG_VALUE);
-static SENSOR_DEVICE_ATTR(swpld3_reg_addr,  S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, SWPLD3_REG_ADDR);
-static SENSOR_DEVICE_ATTR(swpld3_reg_value, S_IRUGO | S_IWUSR, get_cpld_reg, set_cpld_reg, SWPLD3_REG_VALUE);
+static SENSOR_DEVICE_ATTR(cpld_reg_addr,    0644, get_cpld_reg, set_cpld_reg, CPLD_REG_ADDR);
+static SENSOR_DEVICE_ATTR(cpld_reg_value,   0644, get_cpld_reg, set_cpld_reg, CPLD_REG_VALUE);
+static SENSOR_DEVICE_ATTR(swpld1_reg_addr,  0644, get_cpld_reg, set_cpld_reg, SWPLD1_REG_ADDR);
+static SENSOR_DEVICE_ATTR(swpld1_reg_value, 0644, get_cpld_reg, set_cpld_reg, SWPLD1_REG_VALUE);
+static SENSOR_DEVICE_ATTR(swpld2_reg_addr,  0644, get_cpld_reg, set_cpld_reg, SWPLD2_REG_ADDR);
+static SENSOR_DEVICE_ATTR(swpld2_reg_value, 0644, get_cpld_reg, set_cpld_reg, SWPLD2_REG_VALUE);
+static SENSOR_DEVICE_ATTR(swpld3_reg_addr,  0644, get_cpld_reg, set_cpld_reg, SWPLD3_REG_ADDR);
+static SENSOR_DEVICE_ATTR(swpld3_reg_value, 0644, get_cpld_reg, set_cpld_reg, SWPLD3_REG_VALUE);
 
 //QSFP
-static SENSOR_DEVICE_ATTR(sfp_is_present,   S_IRUGO,           for_status,   NULL,            SFP_IS_PRESENT);
-static SENSOR_DEVICE_ATTR(qsfp_lpmode,      S_IRUGO | S_IWUSR, for_status,   set_lpmode_data, QSFP_LPMODE);
-static SENSOR_DEVICE_ATTR(qsfp_reset,       S_IRUGO | S_IWUSR, for_status,   set_reset_data,  QSFP_RESET);
+static SENSOR_DEVICE_ATTR(sfp_is_present,   0444, for_status,   NULL,            SFP_IS_PRESENT);
+static SENSOR_DEVICE_ATTR(qsfp_lpmode,      0644, for_status,   set_lpmode_data, QSFP_LPMODE);
+static SENSOR_DEVICE_ATTR(qsfp_reset,       0644, for_status,   set_reset_data,  QSFP_RESET);
 
 static struct attribute *cpld_attrs[] = {
     &sensor_dev_attr_cpld_reg_value.dev_attr.attr,
@@ -999,7 +1045,16 @@ static struct attribute_group swpld3_attr_grp = {
     .attrs = swpld3_attrs,
 };
 
-static int __init cpld_probe(struct platform_device *pdev)
+static void release_cpld_client(struct cpld_platform_data *pdata,
+                                unsigned int index)
+{
+    if (pdata[index].client) {
+        i2c_unregister_device(pdata[index].client);
+        pdata[index].client = NULL;
+    }
+}
+
+static int cpld_probe(struct platform_device *pdev)
 {
     struct cpld_platform_data *pdata;
     struct i2c_adapter *parent;
@@ -1017,28 +1072,28 @@ static int __init cpld_probe(struct platform_device *pdev)
         return -ENODEV;
     }
 
-    pdata[system_cpld].client = i2c_new_dummy(parent, pdata[system_cpld].reg_addr);
-    if (!pdata[system_cpld].client) {
-        printk(KERN_WARNING "Fail to create dummy i2c client for addr %d\n", pdata[system_cpld].reg_addr);
-        goto error;
+    pdata[system_cpld].client = i2c_new_dummy_device(parent,
+                                                       pdata[system_cpld].reg_addr);
+    i2c_put_adapter(parent);
+    if (IS_ERR(pdata[system_cpld].client)) {
+        ret = PTR_ERR(pdata[system_cpld].client);
+        pdata[system_cpld].client = NULL;
+        return dev_err_probe(&pdev->dev, ret,
+                             "failed to create CPLD client at 0x%02x\n",
+                             pdata[system_cpld].reg_addr);
     }
 
     ret = sysfs_create_group(&pdev->dev.kobj, &cpld_attr_grp);
     if (ret) {
-        printk(KERN_WARNING "Fail to create cpld attribute group");
-        goto error;
+        release_cpld_client(pdata, system_cpld);
+        return ret;
     }
 
     return 0;
 
-error:
-    i2c_unregister_device(pdata[system_cpld].client);
-    i2c_put_adapter(parent);
-
-    return -ENODEV;
 }
 
-static int __init swpld1_probe(struct platform_device *pdev)
+static int swpld1_probe(struct platform_device *pdev)
 {
     struct cpld_platform_data *pdata;
     struct i2c_adapter *parent;
@@ -1055,28 +1110,26 @@ static int __init swpld1_probe(struct platform_device *pdev)
         return -ENODEV;
     }
 
-    pdata[swpld1].client = i2c_new_dummy(parent, pdata[swpld1].reg_addr);
-    if (!pdata[swpld1].client) {
-        printk(KERN_WARNING "Fail to create dummy i2c client for addr %d\n", pdata[swpld1].reg_addr);
-        goto error;
+    pdata[swpld1].client = i2c_new_dummy_device(parent, pdata[swpld1].reg_addr);
+    i2c_put_adapter(parent);
+    if (IS_ERR(pdata[swpld1].client)) {
+        ret = PTR_ERR(pdata[swpld1].client);
+        pdata[swpld1].client = NULL;
+        return dev_err_probe(&pdev->dev, ret,
+                             "failed to create SWPLD1 client at 0x%02x\n",
+                             pdata[swpld1].reg_addr);
     }
 
-    kobj_swpld1 = &pdev->dev.kobj;
     ret = sysfs_create_group(&pdev->dev.kobj, &swpld1_attr_grp);
     if (ret) {
-        printk(KERN_WARNING "Fail to create swpld attribute group");
-        goto error;
+        release_cpld_client(pdata, swpld1);
+        return ret;
     }
     return 0;
 
-error:
-    kobject_put(kobj_swpld1); 
-    i2c_unregister_device(pdata[swpld1].client);
-    i2c_put_adapter(parent);
-    return -ENODEV;
 }
 
-static int __init swpld2_probe(struct platform_device *pdev)
+static int swpld2_probe(struct platform_device *pdev)
 {
     struct cpld_platform_data *pdata;
     struct i2c_adapter *parent;
@@ -1094,30 +1147,27 @@ static int __init swpld2_probe(struct platform_device *pdev)
         return -ENODEV;
     }
 
-    pdata[swpld2].client = i2c_new_dummy(parent, pdata[swpld2].reg_addr);
-    if (!pdata[swpld2].client) {
-        printk(KERN_WARNING "Fail to create dummy i2c client for addr %d\n", pdata[swpld2].reg_addr);
-        goto error;
+    pdata[swpld2].client = i2c_new_dummy_device(parent, pdata[swpld2].reg_addr);
+    i2c_put_adapter(parent);
+    if (IS_ERR(pdata[swpld2].client)) {
+        ret = PTR_ERR(pdata[swpld2].client);
+        pdata[swpld2].client = NULL;
+        return dev_err_probe(&pdev->dev, ret,
+                             "failed to create SWPLD2 client at 0x%02x\n",
+                             pdata[swpld2].reg_addr);
     }
 
-    kobj_swpld2 = &pdev->dev.kobj;
     ret = sysfs_create_group(&pdev->dev.kobj, &swpld2_attr_grp);
     if (ret) {
-        printk(KERN_WARNING "Fail to create swpld attribute group");
-        goto error;
+        release_cpld_client(pdata, swpld2);
+        return ret;
     }
 
     return 0;
 
-error:
-    kobject_put(kobj_swpld2); 
-    i2c_unregister_device(pdata[swpld2].client);
-    i2c_put_adapter(parent);
-
-    return -ENODEV;
 }
 
-static int __init swpld3_probe(struct platform_device *pdev)
+static int swpld3_probe(struct platform_device *pdev)
 {
     struct cpld_platform_data *pdata;
     struct i2c_adapter *parent;
@@ -1135,146 +1185,114 @@ static int __init swpld3_probe(struct platform_device *pdev)
         return -ENODEV;
     }
 
-    pdata[swpld3].client = i2c_new_dummy(parent, pdata[swpld3].reg_addr);
-    if (!pdata[swpld3].client) {
-        printk(KERN_WARNING "Fail to create dummy i2c client for addr %d\n", pdata[swpld3].reg_addr);
-        goto error;
+    pdata[swpld3].client = i2c_new_dummy_device(parent, pdata[swpld3].reg_addr);
+    i2c_put_adapter(parent);
+    if (IS_ERR(pdata[swpld3].client)) {
+        ret = PTR_ERR(pdata[swpld3].client);
+        pdata[swpld3].client = NULL;
+        return dev_err_probe(&pdev->dev, ret,
+                             "failed to create SWPLD3 client at 0x%02x\n",
+                             pdata[swpld3].reg_addr);
     }
 
-    kobj_swpld3 = &pdev->dev.kobj;
     ret = sysfs_create_group(&pdev->dev.kobj, &swpld3_attr_grp);
     if (ret) {
-        printk(KERN_WARNING "Fail to create swpld attribute group");
-        goto error;
+        release_cpld_client(pdata, swpld3);
+        return ret;
     }
 
     return 0;
 
-error:
-    kobject_put(kobj_swpld3); 
-    i2c_unregister_device(pdata[swpld3].client);
-    i2c_put_adapter(parent);
-
-    return -ENODEV;
 }
 
-static int __exit cpld_remove(struct platform_device *pdev)
+static void cpld_remove(struct platform_device *pdev)
 {
-    struct i2c_adapter *parent = NULL;
     struct cpld_platform_data *pdata = pdev->dev.platform_data;
     sysfs_remove_group(&pdev->dev.kobj, &cpld_attr_grp);
 
     if (!pdata) {
         dev_err(&pdev->dev, "Missing platform data\n");
+        return;
     }
-    else {
-        if (pdata[system_cpld].client) {
-            if (!parent) {
-                parent = (pdata[system_cpld].client)->adapter;
-            }
-        i2c_unregister_device(pdata[system_cpld].client);
-        }
-    }
-    i2c_put_adapter(parent);
 
-    return 0;
+    mutex_lock(&dni_lock);
+    release_cpld_client(pdata, system_cpld);
+    mutex_unlock(&dni_lock);
 }
 
-static int __exit swpld1_remove(struct platform_device *pdev)
+static void swpld1_remove(struct platform_device *pdev)
 {
-    struct i2c_adapter *parent = NULL;
     struct cpld_platform_data *pdata = pdev->dev.platform_data;
     sysfs_remove_group(&pdev->dev.kobj, &swpld1_attr_grp);
 
     if (!pdata) {
         dev_err(&pdev->dev, "Missing platform data\n");
+        return;
     }
-    else {
-        if (pdata[swpld1].client) {
-            if (!parent) {
-                parent = (pdata[swpld1].client)->adapter;
-            }
-        i2c_unregister_device(pdata[swpld1].client);
-        }
-    }
-    i2c_put_adapter(parent);
-    return 0;
+
+    mutex_lock(&dni_lock);
+    release_cpld_client(pdata, swpld1);
+    mutex_unlock(&dni_lock);
 }
 
-static int __exit swpld2_remove(struct platform_device *pdev)
+static void swpld2_remove(struct platform_device *pdev)
 {
-    struct i2c_adapter *parent = NULL;
     struct cpld_platform_data *pdata = pdev->dev.platform_data;
     sysfs_remove_group(&pdev->dev.kobj, &swpld2_attr_grp);
 
     if (!pdata) {
         dev_err(&pdev->dev, "Missing platform data\n");
+        return;
     }
-    else {
-        if (pdata[swpld2].client) {
-            if (!parent) {
-                parent = (pdata[swpld2].client)->adapter;
-            }
-        i2c_unregister_device(pdata[swpld2].client);
-        }
-    }
-    i2c_put_adapter(parent);
-    return 0;
+
+    mutex_lock(&dni_lock);
+    release_cpld_client(pdata, swpld2);
+    mutex_unlock(&dni_lock);
 }
 
-static int __exit swpld3_remove(struct platform_device *pdev)
+static void swpld3_remove(struct platform_device *pdev)
 {
-    struct i2c_adapter *parent = NULL;
     struct cpld_platform_data *pdata = pdev->dev.platform_data;
     sysfs_remove_group(&pdev->dev.kobj, &swpld3_attr_grp);
 
     if (!pdata) {
         dev_err(&pdev->dev, "Missing platform data\n");
+        return;
     }
-    else {
-        if (pdata[swpld3].client) {
-            if (!parent) {
-                parent = (pdata[swpld3].client)->adapter;
-            }
-        i2c_unregister_device(pdata[swpld3].client);
-        }
-    }
-    i2c_put_adapter(parent);
-    return 0;
+
+    mutex_lock(&dni_lock);
+    release_cpld_client(pdata, swpld3);
+    mutex_unlock(&dni_lock);
 }
 
 static struct platform_driver cpld_driver = {
     .probe  = cpld_probe,
-    .remove = __exit_p(cpld_remove),
+    .remove = cpld_remove,
     .driver = {
-        .owner  = THIS_MODULE,
         .name   = "delta-ag9032v2a-cpld",
     },
 };
 
 static struct platform_driver swpld1_driver = {
     .probe  = swpld1_probe,
-    .remove = __exit_p(swpld1_remove),
+    .remove = swpld1_remove,
     .driver = {
-        .owner  = THIS_MODULE,
         .name   = "delta-ag9032v2a-swpld1",
     },
 };
 
 static struct platform_driver swpld2_driver = {
     .probe  = swpld2_probe,
-    .remove = __exit_p(swpld2_remove),
+    .remove = swpld2_remove,
     .driver = {
-        .owner  = THIS_MODULE,
         .name   = "delta-ag9032v2a-swpld2",
     },
 };
 
 static struct platform_driver swpld3_driver = {
     .probe  = swpld3_probe,
-    .remove = __exit_p(swpld3_remove),
+    .remove = swpld3_remove,
     .driver = {
-        .owner  = THIS_MODULE,
         .name   = "delta-ag9032v2a-swpld3",
     },
 };
@@ -1395,7 +1413,7 @@ static int swpld_mux_select(struct i2c_mux_core *muxc, u32 chan)
     return ret;
 }
 
-static int __init cpld_mux_probe(struct platform_device *pdev)
+static int cpld_mux_probe(struct platform_device *pdev)
 {
     struct i2c_mux_core *muxc;
     struct cpld_mux *mux;
@@ -1408,15 +1426,8 @@ static int __init cpld_mux_probe(struct platform_device *pdev)
         dev_err(&pdev->dev, "CPLD platform data not found\n");
         return -ENODEV;
     }
-    mux = kzalloc(sizeof(*mux), GFP_KERNEL);
-    if (!mux) {
-        printk(KERN_ERR "Failed to allocate memory for mux\n");
-        return -ENOMEM;
-    }
-    mux->data = *pdata;
     parent = i2c_get_adapter(pdata->parent);
     if (!parent) {
-        kfree(mux);
         dev_err(&pdev->dev, "Parent adapter (%d) not found\n", pdata->parent);
         return -ENODEV;
     }
@@ -1429,36 +1440,37 @@ static int __init cpld_mux_probe(struct platform_device *pdev)
             dev_num = DEF_DEV_NUM;
             break;
     }
-    muxc = i2c_mux_alloc(parent, &pdev->dev, dev_num, 0, 0, cpld_mux_select, NULL);
+    muxc = i2c_mux_alloc(parent, &pdev->dev, dev_num, sizeof(*mux), 0,
+                         cpld_mux_select, NULL);
     if (!muxc) {
         ret = -ENOMEM;
         goto alloc_failed;
     }
-    muxc->priv = mux;
+    mux = i2c_mux_priv(muxc);
+    mux->data = *pdata;
     platform_set_drvdata(pdev, muxc);
 
     for (i = 0; i < dev_num; i++)
     {
         int nr = pdata->base_nr + i;
-        unsigned int class = 0;
-        ret = i2c_mux_add_adapter(muxc, nr, i, class);
+        ret = i2c_mux_add_adapter(muxc, nr, i);
         if (ret) {
             dev_err(&pdev->dev, "Failed to add adapter %d\n", i);
             goto add_adapter_failed;
         }
     }
     dev_info(&pdev->dev, "%d port mux on %s adapter\n", dev_num, parent->name);
+    i2c_put_adapter(parent);
     return 0;
 
 add_adapter_failed:
     i2c_mux_del_adapters(muxc);
 alloc_failed:
-    kfree(mux);
     i2c_put_adapter(parent);
     return ret;
 }
 
-static int __init swpld_mux_probe(struct platform_device *pdev)
+static int swpld_mux_probe(struct platform_device *pdev)
 {
     struct i2c_mux_core *muxc;
     struct cpld_mux *mux;
@@ -1471,15 +1483,8 @@ static int __init swpld_mux_probe(struct platform_device *pdev)
         dev_err(&pdev->dev, "SWPLD platform data not found\n");
         return -ENODEV;
     }
-    mux = kzalloc(sizeof(*mux), GFP_KERNEL);
-    if (!mux) {
-        printk(KERN_ERR "Failed to allocate memory for mux\n");
-        return -ENOMEM;
-    }
-    mux->data = *pdata;
     parent = i2c_get_adapter(pdata->parent);
     if (!parent) {
-        kfree(mux);
         dev_err(&pdev->dev, "Parent adapter (%d) not found\n", pdata->parent);
         return -ENODEV;
     }
@@ -1493,71 +1498,64 @@ static int __init swpld_mux_probe(struct platform_device *pdev)
             break;
     }
 
-    muxc = i2c_mux_alloc(parent, &pdev->dev, dev_num, 0, 0, swpld_mux_select, NULL);
+    muxc = i2c_mux_alloc(parent, &pdev->dev, dev_num, sizeof(*mux), 0,
+                         swpld_mux_select, NULL);
     if (!muxc) {
         ret = -ENOMEM;
         goto alloc_failed;
     }
-    muxc->priv = mux;
+    mux = i2c_mux_priv(muxc);
+    mux->data = *pdata;
     platform_set_drvdata(pdev, muxc);
     for (i = 0; i < dev_num; i++) 
     {
         int nr = pdata->base_nr + i;
-        unsigned int class = 0;
-       	ret = i2c_mux_add_adapter(muxc, nr, i, class);
+        ret = i2c_mux_add_adapter(muxc, nr, i);
         if (ret) {
             dev_err(&pdev->dev, "Failed to add adapter %d\n", i);
             goto add_adapter_failed;
         }
     }
     dev_info(&pdev->dev, "%d port mux on %s adapter\n", dev_num, parent->name);
+    i2c_put_adapter(parent);
     return 0;
 
 add_adapter_failed:
     i2c_mux_del_adapters(muxc);
 alloc_failed:
-    kfree(mux);
     i2c_put_adapter(parent);
 
     return ret;
 }
 
-static int __exit cpld_mux_remove(struct platform_device *pdev)
+static void cpld_mux_remove(struct platform_device *pdev)
 {
     struct i2c_mux_core *muxc  = platform_get_drvdata(pdev);
-    struct i2c_adapter *parent = muxc->parent;
 
-    i2c_mux_del_adapters(muxc);
-    i2c_put_adapter(parent);
-
-    return 0;
+    if (muxc)
+        i2c_mux_del_adapters(muxc);
 }
 
-static int __exit swpld_mux_remove(struct platform_device *pdev)
+static void swpld_mux_remove(struct platform_device *pdev)
 {
     struct i2c_mux_core *muxc  = platform_get_drvdata(pdev);
-    struct i2c_adapter *parent = muxc->parent;
 
-    i2c_mux_del_adapters(muxc);
-    i2c_put_adapter(parent);
-
-    return 0;
+    if (muxc)
+        i2c_mux_del_adapters(muxc);
 }
 
 static struct platform_driver cpld_mux_driver = {
     .probe  = cpld_mux_probe,
-    .remove = __exit_p(cpld_mux_remove), /* TODO */
+    .remove = cpld_mux_remove,
     .driver = {
-        .owner  = THIS_MODULE,
         .name   = "delta-ag9032v2a-cpld-mux",
     },
 };
 
 static struct platform_driver swpld1_mux_driver = {
     .probe  = swpld_mux_probe,
-    .remove = __exit_p(swpld_mux_remove), /* TODO */
+    .remove = swpld_mux_remove,
     .driver = {
-        .owner  = THIS_MODULE,
         .name   = "delta-ag9032v2a-swpld1-mux",
     },
 };
@@ -1577,6 +1575,12 @@ static int __init delta_ag9032v2a_platform_init(void)
     
     mutex_init(&dni_lock);
     printk("ag9032v2a_platform module initialization\n");
+
+    ret = i2c_add_driver(&delta_pca9548_driver);
+    if (ret) {
+        pr_err("failed to register fixed-bus PCA9548 driver: %d\n", ret);
+        return ret;
+    }
 
     ret = platform_driver_register(&cpld_driver);
     if (ret) {
@@ -1646,8 +1650,19 @@ static int __init delta_ag9032v2a_platform_init(void)
     }
 
     adapter = i2c_get_adapter(BUS2);
-    i2c_client_9548 = i2c_new_device(adapter, &i2c_info_pca9548[0]);
+    if (!adapter) {
+        ret = -EPROBE_DEFER;
+        pr_err("PCA9548 parent adapter %d is unavailable\n", BUS2);
+        goto error_swpld1_device;
+    }
+    i2c_client_9548 = i2c_new_client_device(adapter, &i2c_info_pca9548[0]);
     i2c_put_adapter(adapter);
+    if (IS_ERR(i2c_client_9548)) {
+        ret = PTR_ERR(i2c_client_9548);
+        i2c_client_9548 = NULL;
+        pr_err("failed to create PCA9548 client: %d\n", ret);
+        goto error_swpld1_device;
+    }
 
     // register the SWPLD
     ret = platform_device_register(&swpld1_device);
@@ -1702,7 +1717,10 @@ error_ag9032v2a_i2c_device:
         platform_device_unregister(&ag9032v2a_i2c_device[i]);
     }
     i = ARRAY_SIZE(swpld1_mux_device);
+    goto error_ag9032v2a_swpld1_mux_cleanup;
 error_ag9032v2a_swpld1_mux:
+    /* i is the index that failed; only unwind completed registrations. */
+error_ag9032v2a_swpld1_mux_cleanup:
     i--;
     for (; i >= 0; i--) {
         platform_device_unregister(&swpld1_mux_device[i]);
@@ -1713,7 +1731,10 @@ error_swpld3_device:
 error_swpld2_device:
     platform_device_unregister(&swpld1_device);
 error_swpld1_device:
-    i2c_unregister_device(i2c_client_9548);
+    if (i2c_client_9548) {
+        i2c_unregister_device(i2c_client_9548);
+        i2c_client_9548 = NULL;
+    }
     i = ARRAY_SIZE(cpld_mux_device);
 error_cpld_mux:
     i--;
@@ -1736,6 +1757,7 @@ error_swpld2_driver:
 error_swpld1_driver:
     platform_driver_unregister(&cpld_driver);
 error_cpld_driver:
+    i2c_del_driver(&delta_pca9548_driver);
     return ret;
 }
 
@@ -1760,7 +1782,10 @@ static void __exit delta_ag9032v2a_platform_exit(void)
     platform_device_unregister(&swpld3_device);
     platform_driver_unregister(&swpld3_driver);
 
-    i2c_unregister_device(i2c_client_9548);
+    if (i2c_client_9548) {
+        i2c_unregister_device(i2c_client_9548);
+        i2c_client_9548 = NULL;
+    }
 
     for (i = 0; i < ARRAY_SIZE(cpld_mux_device); i++) {
         platform_device_unregister(&cpld_mux_device[i]);
@@ -1771,6 +1796,7 @@ static void __exit delta_ag9032v2a_platform_exit(void)
     platform_driver_unregister(&cpld_mux_driver);
     platform_device_unregister(&cpld_device);
     platform_driver_unregister(&cpld_driver);    
+    i2c_del_driver(&delta_pca9548_driver);
 }
 
 module_init(delta_ag9032v2a_platform_init);
