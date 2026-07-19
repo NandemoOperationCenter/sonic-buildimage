@@ -1028,7 +1028,7 @@ class TestCfgGen(TestCase):
         # causing yang validation to fail
 
         os.environ["CFGGEN_UNIT_TESTING"] = ""
-        argument = ['-m', self.packet_chassis_graph, '-v', "ACL_TABLE"]
+        argument = ['-m', self.packet_chassis_graph, '-p', self.packet_chassis_port_ini, '-v', "ACL_TABLE"]
         output = self.run_script(argument)
         print(output)
         self.assertEqual(
