@@ -38,6 +38,8 @@ class TestCfgGen(TestCase):
         self.packet_chassis_graph0 = os.path.join(self.test_dir, 'minigraph-str2-temp-2-lc04.xml')
         self.packet_chassis_graph = os.path.join(self.test_dir, 'sample-chassis-packet-lc-graph.xml')
         self.packet_chassis_port_ini = os.path.join(self.test_dir, 'sample-chassis-packet-lc-port-config.ini')
+        self.packet_chassis_local_host_port_ini = os.path.join(
+            self.test_dir, 'sample-chassis-packet-lc-localhost-port-config.ini')
         self.macsec_profile = os.path.join(self.test_dir, 'macsec_profile.json')
         self.sample_backend_graph = os.path.join(self.test_dir, 'sample-graph-storage-backend.xml')
         self.voq_port_config_400g = os.path.join(self.test_dir, 'voq-sample-400g-port-config.ini')
@@ -1028,7 +1030,7 @@ class TestCfgGen(TestCase):
         # causing yang validation to fail
 
         os.environ["CFGGEN_UNIT_TESTING"] = ""
-        argument = ['-m', self.packet_chassis_graph, '-p', self.packet_chassis_port_ini, '-v', "ACL_TABLE"]
+        argument = ['-m', self.packet_chassis_graph, '-p', self.packet_chassis_local_host_port_ini, '-v', "ACL_TABLE"]
         output = self.run_script(argument)
         print(output)
         self.assertEqual(
