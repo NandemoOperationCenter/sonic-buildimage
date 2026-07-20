@@ -242,6 +242,12 @@ class TestDeviceInfo(object):
         result = device_info.get_platform_json_data()
         assert result is None
 
+        # Test case where get_path_to_platform_dir raises OSError (no platform dir in container)
+        mock_get_path_to_platform_dir.side_effect = OSError("Failed to locate platform directory")
+        result = device_info.get_platform_json_data()
+        assert result is None
+        mock_get_path_to_platform_dir.side_effect = None
+
         # Test case where platform.json file does not exist
         mock_get_path_to_platform_dir.return_value = "/usr/share/sonic/device"
         mock_isfile.return_value = False
