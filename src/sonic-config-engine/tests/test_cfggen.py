@@ -1023,21 +1023,15 @@ class TestCfgGen(TestCase):
         )
 
     def test_minigraph_packet_chassis_acl_local_host(self):
-        # CFGGEN_UNIT_TESTING is set to '2' in the set_up function
-        # this causes the port_table to have ports from the previous test
-        # causing yang validation to fail
-
-        os.environ["CFGGEN_UNIT_TESTING"] = ""
-        argument = ['-m', self.packet_chassis_graph, '-v', "ACL_TABLE"]
+        # The explicit port configuration avoids reading the mock PORT table.
+        # Keep the unit-test database setup for the ASIC namespace.
+        argument = ['-m', self.packet_chassis_graph, '-p', self.packet_chassis_port_ini, '-n', "asic1", '-v', "ACL_TABLE"]
         output = self.run_script(argument)
         print(output)
         self.assertEqual(
             utils.to_dict(output.strip()),
             utils.to_dict("{'SNMP_ACL': {'policy_desc': 'SNMP_ACL', 'type': 'CTRLPLANE', 'stage': 'ingress', 'services': ['SNMP']}, 'SSH_ONLY': {'policy_desc': 'SSH_ONLY', 'type': 'CTRLPLANE', 'stage': 'ingress', 'services': ['SSH']}}")
         )
-
-        # set it back to the original value
-        os.environ["CFGGEN_UNIT_TESTING"] = "2"
 
     def test_minigraph_packet_chassis_acl_namespace(self):
 

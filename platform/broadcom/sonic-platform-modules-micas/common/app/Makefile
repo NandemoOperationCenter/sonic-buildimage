@@ -10,13 +10,18 @@ common_module_dir := $(COMMON_OUT_PUT)/module/
 port_out_put_dir := $(COMMON_OUT_PUT)/app
 export common_out_put_dir common_module_dir port_out_put_dir
 
+APP_OUTPUT_DIRS := $(common_out_put_dir) $(common_module_dir)
+
 all : CHECK $(SUBDIRS)
 CHECK :
 	@echo $(pes_parent_dir)
 
-$(SUBDIRS):ECHO
+$(SUBDIRS): ECHO | $(APP_OUTPUT_DIRS)
 	#@echo $@
 	make -C $@
+
+$(APP_OUTPUT_DIRS):
+	@mkdir -p $@
 
 ECHO:
 	@echo $(SUBDIRS)

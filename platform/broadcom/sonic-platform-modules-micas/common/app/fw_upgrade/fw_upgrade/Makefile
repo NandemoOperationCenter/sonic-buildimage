@@ -17,10 +17,14 @@ INCLUDE = -Iinclude
 CFLAGS+=-Wall -W -g
 
 .PHONY: build
-build:make-dir $(addprefix $(BUILD_DIR)/,$(OBJ))
+build: make-dir $(addprefix $(BUILD_DIR)/,$(OBJ)) | $(common_out_put_dir)
 	$(CC) -o $(ELF_FILE) $(addprefix $(BUILD_DIR)/,$(OBJ)) $(LINKFLAGS) $(LIB)
 
 	cp -p $(ELF_FILE) $(common_out_put_dir)
+
+.PHONY: $(common_out_put_dir)
+$(common_out_put_dir):
+	@mkdir -p $@
 
 .PHONY: make-dir
 make-dir:
@@ -30,7 +34,7 @@ $(BUILD_DIR)/%.o:%.c
 	$(CC) -c $(CFLAGS) $(INCLUDE) $< -o $@
 
 .PHONY: install
-install:
+install: | $(common_out_put_dir)
 	echo "fw_upgrade install success."
 	cp -p $(ELF_FILE) $(common_out_put_dir)
 

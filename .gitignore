@@ -52,6 +52,11 @@ platform/*/docker-*/*manifest*
 
 # Installer-related files and directories
 installer/x86_64/platforms/
+installer/platforms/
+installer/platforms_asic
+
+# Top-level generated build metadata and local logs
+database-chassis.service
 
 # Misc. files
 asic_config_checksum
@@ -79,6 +84,18 @@ src/sonic-frr/.sonic-frr-patch-*.sha1
 # .o files
 src/**/*.o
 
+# Extracted source-package and Python build trees
+src/**/build/
+src/**/*.egg-info/
+src/flashrom/flashrom-*/
+src/iproute2/iproute2-*/
+src/libyang3-py3/libyang-python/
+src/makedumpfile/makedumpfile-*/
+src/rasdaemon/rasdaemon/
+src/rdb-cli/librdb/
+src/sonic-eventd/eventdb
+*.dsc
+
 # platform
 platform/**/*.egg-info
 platform/**/*-none-any.whl
@@ -99,6 +116,9 @@ platform/**/*.d
 !platform/**/etc/systemd/system/*.d
 platform/**/*.cmd
 platform/**/*.order
+platform/**/tmp/
+platform/**/Module.symvers
+platform/**/kcompat_generated_defs.h
 platform/broadcom/sonic-platform-modules-dell/s5232f/sonic_platform/ipmihelper.py
 platform/broadcom/sonic-platform-modules-dell/s6100/modules/dell_ich.c
 platform/broadcom/sonic-platform-modules-dell/s6100/modules/dell_s6100_lpc.c
