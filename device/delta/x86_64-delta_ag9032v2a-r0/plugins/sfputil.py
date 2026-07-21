@@ -178,6 +178,12 @@ class SfpUtil(SfpUtilBase):
 
         return True
 
+    def get_transceiver_info_dict(self, port_num):
+        info = SfpUtilBase.get_transceiver_info_dict(self, port_num)
+        if info is not None and 'vendor_rev' not in info and 'hardware_rev' in info:
+            info['vendor_rev'] = info['hardware_rev']
+        return info
+
     def get_transceiver_change_event(self, timeout=0):
         if timeout < 0:
             print("get_transceiver_change_event: Invalid timeout value", timeout)
