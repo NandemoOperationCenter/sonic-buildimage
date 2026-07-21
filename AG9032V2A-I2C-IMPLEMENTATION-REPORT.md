@@ -217,12 +217,18 @@ The initial committed summary is 50 insertions and 16 deletions in one file.
 
 ## Current source delta
 
-Two V2A-specific files have follow-up changes:
+Four V2A-specific files have follow-up changes:
 
 ```text
 platform/broadcom/sonic-platform-modules-delta/ag9032v2a/scripts/ag9032v2a_platform_init.sh
+platform/broadcom/sonic-platform-modules-delta/ag9032v2a/cfg/ag9032v2a-params.conf
+platform/broadcom/sonic-platform-modules-delta/debian/platform-modules-ag9032v2a.install
 device/delta/x86_64-delta_ag9032v2a-r0/plugins/sfputil.py
 ```
+
+The package installs `options i2c-smbus disable_spd=1` under
+`/etc/modprobe.d`, ensuring that the earlier modules-load phase applies the
+policy when `i2c-i801` first loads.
 
 The init script:
 
@@ -266,7 +272,7 @@ def get_transceiver_info_dict(self, port_num):
 - Controlled init-script test from `disable_spd=N` and root `0-0050`: PASS.
 - `git diff --check`: PASS.
 - IDE lint diagnostics: no errors.
-- Follow-up scope: exactly two V2A files plus this report.
+- Follow-up scope: exactly four V2A files plus this report.
 - Protected Stage 2 BCM, common-config marker, SAI profile, and
   `port_config.ini`: unchanged.
 - No C code changed; therefore no memory/string function was introduced.
@@ -421,8 +427,8 @@ The initial plugin commit can be reverted with:
 git revert 97034b770ccaf48b8a25a3f9481f4ab8d57828fb
 ```
 
-Revert only the focused SPD/vendor_rev follow-up commit to remove the current
-two-file source change.
+Revert only the focused SPD/vendor_rev follow-up commits to remove the current
+four-file source change.
 
 Do not revert Stage 2 BCM/common-config, premium Cancun, or EEPROM sysfs
 commits.
