@@ -77,8 +77,16 @@ Readiness source commit:
   e9d61d0e65a2c52c249f1a728e9566d44c3abb75
   wait for ag9032v2a EEPROM topology readiness
 
+Readiness report commit:
+  9797195ce88aadbc067e2ad2227590777cfefa9b
+  document successful ag9032v2a EEPROM readiness validation
+
 Readiness merged commit:
-  none; build 6 was produced directly from the focused branch commit
+  d0a5c252bb99a6687f18b269bde1a853fd4cf553
+  merge AG9032V2A I2C readiness fix
+
+Build 6 was produced directly from the focused source commit before the
+report and merge commits.
 ```
 
 The readiness commit changes only:
